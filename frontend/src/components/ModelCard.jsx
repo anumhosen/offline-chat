@@ -30,13 +30,13 @@ export default function ModelCard({
   const downloaded = hasProgress ? downloadProgress.downloaded || 0 : 0;
   const total = hasProgress ? downloadProgress.total || 0 : 0;
 
-  console.log(`ModelCard [${model.name}]:`, {
-    hasProgress,
-    isDownloading,
-    isComplete,
-    progress,
-    downloadProgress,
-  });
+  //console.log(`ModelCard [${model.name}]:`, {
+  //   hasProgress,
+  //   isDownloading,
+  //   isComplete,
+  //   progress,
+  //   downloadProgress,
+  // });
 
   const formatBytes = (bytes) => {
     if (!bytes || bytes === 0) return '0 B';

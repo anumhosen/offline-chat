@@ -33,7 +33,7 @@ export default function Sidebar({
   };
 
   return (
-    <aside className="w-64 lg:w-80 bg-gray-900 border-r border-gray-800 flex flex-col flex-shrink-0">
+    <aside className="w-72 bg-gray-900 border-r border-gray-800 flex flex-col flex-shrink-0">
       {/* Header */}
       <div className="flex h-10 items-center justify-between p-3 border-b border-gray-800">
         <h2 className="text-sm font-semibold text-gray-300">Chats</h2>
