@@ -2,6 +2,9 @@ const path = require("path");
 const fs = require("fs");
 const { app } = require("electron");
 
+/**
+ * LLMService - Manages loading and inference of GGUF models via node-llama-cpp
+ */
 class LLMService {
     constructor() {
         this.llama = null;
@@ -11,165 +14,181 @@ class LLMService {
         this.modelName = null;
         this.modelPath = null;
         this.generating = false;
-        this.batchSize = 512; // Default, will be overridden
-        this.contextSize = 4096;
-        this.threads = 4;
+        
+        // Default configuration
+        this.config = {
+            batchSize: 512,
+            contextSize: 4096,
+            threads: 4,
+        };
     }
 
+    /**
+     * Initialize the LLM with the specified model file
+     * @param {string} modelPath - Path to the GGUF model file
+     * @param {Object} options - Configuration options
+     * @param {number} options.contextSize - Context window size (default: 4096)
+     * @param {number} options.threads - Number of CPU threads (default: 6)
+     * @param {number} options.batchSize - Batch size for inference (default: 512)
+     * @returns {Promise<boolean>} True if initialization successful
+     */
     async initialize(modelPath, options = {}) {
-        //console.log("=== LLMService.initialize ===");
-        //console.log("Model:", path.basename(modelPath));
-        //console.log("Options:", options);
-
         if (this.initialized) {
-            this.initialized = false;
+            this.reset();
         }
 
-        if (!modelPath || !fs.existsSync(modelPath)) {
-            throw new Error(`Model file not found: ${modelPath}`);
-        }
-
-        const modelSize = fs.statSync(modelPath).size;
-        const modelSizeGB = modelSize / 1e9;
-        //console.log(`Model size: ${modelSizeGB.toFixed(2)} GB`);
-
-        // Use options or defaults
-        this.contextSize = options.contextSize || 4096;
-        this.threads = options.threads || 6;
-        this.batchSize = options.batchSize || 512;
-
-        //console.log(
-        //     `Config: context=${this.contextSize}, threads=${this.threads}, batchSize=${this.batchSize}`,
-        // );
+        this.validateModelPath(modelPath);
+        this.updateConfig(options);
 
         try {
             const { getLlama } = await import("node-llama-cpp");
 
-            if (!this.llama) {
-                this.llama = await getLlama({ gpu: "auto" });
-            }
-
-            if (!this.model) {
-                //console.log("Loading model...");
-                this.model = await this.llama.loadModel({
-                    modelPath: modelPath,
-                    gpuLayers: "auto",
-                });
-            }
-
-            //console.log(
-            //     `Creating context (contextSize=${this.contextSize}, batchSize=${this.batchSize}, threads=${this.threads})...`,
-            // );
-            this.context = await this.model.createContext({
-                contextSize: this.contextSize,
-                threads: this.threads,
-                batchSize: this.batchSize,
-                sequences: 1,
+            this.llama = await getLlama({ gpu: "auto" });
+            this.model = await this.llama.loadModel({
+                modelPath,
+                gpuLayers: "auto",
             });
 
+            this.context = await this.createContext();
             this.modelName = path.basename(modelPath, ".gguf");
             this.modelPath = modelPath;
             this.initialized = true;
 
-            //console.log("✓ Model ready");
-            //console.log(`  Name: ${this.modelName}`);
-            //console.log(`  Context: ${this.contextSize}`);
-            //console.log(`  Batch: ${this.batchSize}`);
-            //console.log(`  Threads: ${this.threads}`);
             return true;
         } catch (error) {
-            console.error("Failed to initialize:", error.message);
-
-            // Try with lower batch size if VRAM error
-            if (error.message.includes("VRAM") || error.message.includes("too large")) {
-                const fallbackBatch = Math.floor(this.batchSize / 2);
-                if (fallbackBatch >= 128) {
-                    //console.log(`Retrying with batchSize=${fallbackBatch}...`);
-                    try {
-                        this.context = await this.model.createContext({
-                            contextSize: this.contextSize,
-                            threads: this.threads,
-                            batchSize: fallbackBatch,
-                            sequences: 1,
-                        });
-                        this.batchSize = fallbackBatch;
-                        this.modelName = path.basename(modelPath, ".gguf");
-                        this.modelPath = modelPath;
-                        this.initialized = true;
-                        //console.log("✓ Model ready with reduced batch size");
-                        return true;
-                    } catch (e) {
-                        console.error("Fallback failed:", e.message);
-                    }
-                }
-            }
-
-            this.llama = null;
-            this.model = null;
-            this.context = null;
-            this.initialized = false;
-            throw error;
+            return this.handleInitializationError(error, modelPath);
         }
     }
 
-    async generateResponse(messages, onToken) {
-        if (!this.initialized) {
-            throw new Error("No model loaded");
+    /**
+     * Validate that the model file exists
+     * @private
+     */
+    validateModelPath(modelPath) {
+        if (!modelPath || !fs.existsSync(modelPath)) {
+            throw new Error(`Model file not found: ${modelPath}`);
+        }
+    }
+
+    /**
+     * Update configuration with provided options
+     * @private
+     */
+    updateConfig(options) {
+        this.config.contextSize = options.contextSize || this.config.contextSize;
+        this.config.threads = options.threads || this.config.threads;
+        this.config.batchSize = options.batchSize || this.config.batchSize;
+    }
+
+    /**
+     * Create context with current configuration
+     * @private
+     */
+    async createContext(overrides = {}) {
+        const config = { ...this.config, ...overrides };
+        return this.model.createContext({
+            contextSize: config.contextSize,
+            threads: config.threads,
+            batchSize: config.batchSize,
+            sequences: 1,
+        });
+    }
+
+    /**
+     * Handle initialization errors with fallback strategies
+     * @private
+     */
+    async handleInitializationError(error, modelPath) {
+        console.error("Failed to initialize:", error.message);
+
+        if (this.isVramError(error)) {
+            return this.tryFallbackBatchSize(modelPath);
         }
 
-        //console.log("=== generateResponse ===");
-        //console.log(`Using batchSize=${this.batchSize}, contextSize=${this.contextSize}`);
+        this.cleanup();
+        throw error;
+    }
+
+    /**
+     * Check if error is VRAM-related
+     * @private
+     */
+    isVramError(error) {
+        return error.message.includes("VRAM") || error.message.includes("too large");
+    }
+
+    /**
+     * Attempt initialization with reduced batch size
+     * @private
+     */
+    async tryFallbackBatchSize(modelPath) {
+        const fallbackBatch = Math.floor(this.config.batchSize / 2);
+        
+        if (fallbackBatch < 128) {
+            this.cleanup();
+            throw new Error("Cannot reduce batch size further");
+        }
+
+        try {
+            this.context = await this.createContext({ batchSize: fallbackBatch });
+            this.config.batchSize = fallbackBatch;
+            this.modelName = path.basename(modelPath, ".gguf");
+            this.modelPath = modelPath;
+            this.initialized = true;
+            return true;
+        } catch (e) {
+            console.error("Fallback failed:", e.message);
+            this.cleanup();
+            throw e;
+        }
+    }
+
+    /**
+     * Reset service state
+     * @private
+     */
+    reset() {
+        this.initialized = false;
+        this.cleanup();
+    }
+
+    /**
+     * Clean up resources
+     * @private
+     */
+    cleanup() {
+        this.llama = null;
+        this.model = null;
+        this.context = null;
+        this.initialized = false;
+    }
+
+    /**
+     * Generate a response from the model
+     * @param {Array} messages - Array of message objects with role and content
+     * @param {Function} onToken - Callback for streaming tokens
+     * @returns {Promise<string>} Generated response text
+     */
+    async generateResponse(messages, onToken) {
+        this.validateInitialized();
 
         const { LlamaChatSession } = await import("node-llama-cpp");
+        const sequence = this.getSequence();
 
-        let sequence;
-        try {
-            sequence = this.context.getSequence();
-        } catch (e) {
-            //console.log("No sequences left, recreating context...");
-            this.context = await this.model.createContext({
-                contextSize: this.contextSize,
-                threads: this.threads,
-                batchSize: this.batchSize,
-                sequences: 1,
-            });
-            sequence = this.context.getSequence();
-        }
-
-        if (!sequence) {
-            throw new Error("Failed to get context sequence");
-        }
-
-        const systemPrompt =
-            messages.find((m) => m.role === "system")?.content ||
-            "You are a helpful AI assistant. Keep answers concise and clear.";
-
+        const systemPrompt = this.extractSystemPrompt(messages);
         const session = new LlamaChatSession({
             contextSequence: sequence,
-            systemPrompt: systemPrompt,
+            systemPrompt,
         });
 
         this.generating = true;
         const conversationMessages = messages.filter((m) => m.role !== "system");
 
         try {
-            for (let i = 0; i < conversationMessages.length - 1; i++) {
-                await session.prompt(conversationMessages[i].content, {
-                    temperature: 0.7,
-                    maxTokens: 128,
-                });
-            }
-
-            const lastMessage = conversationMessages[conversationMessages.length - 1];
-            //console.log(`Prompt: "${lastMessage.content.slice(0, 80)}..."`);
-
-            const response = await session.prompt(lastMessage.content, {
-                temperature: 0.7,
-                maxTokens: 2048,
-            });
+            await this.processConversationHistory(session, conversationMessages);
+            const response = await this.generateCompletion(session, conversationMessages);
 
             this.generating = false;
-            //console.log(`Response: ${response.length} chars`);
 
             if (onToken) {
                 onToken(response);
@@ -183,12 +202,88 @@ class LLMService {
         }
     }
 
+    /**
+     * Validate that the service is initialized
+     * @private
+     */
+    validateInitialized() {
+        if (!this.initialized) {
+            throw new Error("No model loaded");
+        }
+    }
+
+    /**
+     * Get or recreate a sequence from the context
+     * @private
+     */
+    getSequence() {
+        try {
+            return this.context.getSequence();
+        } catch (e) {
+            this.context = this.recreateContext();
+            return this.context.getSequence();
+        }
+    }
+
+    /**
+     * Recreate context with current configuration
+     * @private
+     */
+    async recreateContext() {
+        return this.createContext();
+    }
+
+    /**
+     * Extract system prompt from messages
+     * @private
+     */
+    extractSystemPrompt(messages) {
+        return (
+            messages.find((m) => m.role === "system")?.content ||
+            "You are a helpful AI assistant. Keep answers concise and clear."
+        );
+    }
+
+    /**
+     * Process conversation history before the final message
+     * @private
+     */
+    async processConversationHistory(session, messages) {
+        const historyMessages = messages.slice(0, -1);
+        for (const message of historyMessages) {
+            await session.prompt(message.content, {
+                temperature: 0.7,
+                maxTokens: 128,
+            });
+        }
+    }
+
+    /**
+     * Generate completion for the last message
+     * @private
+     */
+    async generateCompletion(session, messages) {
+        const lastMessage = messages[messages.length - 1];
+        return session.prompt(lastMessage.content, {
+            temperature: 0.7,
+            maxTokens: 2048,
+        });
+    }
+
+    /**
+     * Stop ongoing generation
+     */
     stopGeneration() {
         this.generating = false;
     }
 
+    /**
+     * Get list of available models from the models directory
+     * @returns {Array} Array of model objects with name, path, and size
+     */
     static getAvailableModels() {
-        const modelsDir = path.join(app.getPath("userData"), "models");
+        const modelsDir = this.getModelsDirectory();
+        
         if (!fs.existsSync(modelsDir)) {
             fs.mkdirSync(modelsDir, { recursive: true });
             return [];
@@ -211,6 +306,18 @@ class LLMService {
         }
     }
 
+    /**
+     * Get the models directory path
+     * @private
+     */
+    static getModelsDirectory() {
+        return path.join(app.getPath("userData"), "models");
+    }
+
+    /**
+     * Get recommended models for download
+     * @returns {Array} Array of recommended model metadata
+     */
     static getRecommendedModels() {
         return [
             {

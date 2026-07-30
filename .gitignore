@@ -1,8 +1,1 @@
-node_modules/
-dist/
-release/
-.env
-.env.local
-*.log
-.DS_Store
-Thumbs.db
+Nothing should be ignored since the changes only include source code files (.js files) and no build artifacts, dependencies, or temporary files.
